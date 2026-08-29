@@ -153,7 +153,7 @@
 
   <script type="module">
     import { initializeApp } from "https://www.gstatic.com/firebasejs/10.12.2/firebase-app.js";
-    import { getDatabase, ref, set, get, onValue, update, runTransaction } from "https://www.gstatic.com/firebasejs/10.12.2/firebase-database.js";
+    import { getDatabase, ref, set, get, onValue, update, runTransaction, onDisconnect } from "https://www.gstatic.com/firebasejs/10.12.2/firebase-database.js";
 
     const firebaseConfig = {
       apiKey: "AIzaSyC1akT6-tAIOUnN9F6FcvBHVjcX-gYafgk",
@@ -168,7 +168,7 @@
 
     const app = initializeApp(firebaseConfig);
     const db = getDatabase(app);
-    let mode = "", roomCode = "", secret = "", singleHistory = [], stopListen = null;
+    let mode = "", roomCode = "", secret = "", singleHistory = [], stopListen = null, presenceRef = null;
     const myId = (crypto.randomUUID ? crypto.randomUUID() : `${Date.now()}_${Math.random()}`).replaceAll('.', '');
     const $ = (id) => document.getElementById(id);
     const esc = (value) => String(value).replace(/[&<>"']/g, (char) => ({"&":"&amp;","<":"&lt;",">":"&gt;","\"":"&quot;","'":"&#039;"}[char]));
@@ -183,23 +183,89 @@
       return name;
     };
     const showFirebaseError = (error) => { showErr(error?.code === "PERMISSION_DENIED" ? "Firebase 權限不足，請檢查 Realtime Database Rules。" : "連線發生問題，請確認 Firebase 設定與網路。 "); console.error(error); };
+    const playerRefFor = (code) => ref(db, `rooms/${code}/players/${myId}`);
+    const armDisconnect = async (code) => { presenceRef = playerRefFor(code); await onDisconnect(presenceRef).remove(); };
+    const removeFromRoom = async (code, playerRef = playerRefFor(code)) => {
+      try { await set(playerRef, null); await onDisconnect(playerRef).cancel(); }
+      catch (error) { showFirebaseError(error); }
+    };
 
-    function home() { if (stopListen) stopListen(); stopListen = null; roomCode = ""; mode = ""; $("game").classList.add("hidden"); $("multi").classList.add("hidden"); $("home").classList.remove("hidden"); }
+    function home() {
+      const leavingRoom = roomCode;
+      const leavingPresenceRef = presenceRef;
+      if (stopListen) stopListen();
+      stopListen = null;
+      presenceRef = null;
+      if (leavingRoom) removeFromRoom(leavingRoom, leavingPresenceRef || playerRefFor(leavingRoom));
+      roomCode = ""; mode = "";
+      $("game").classList.add("hidden"); $("multi").classList.add("hidden"); $("home").classList.remove("hidden");
+    }
     function showMulti() { $("home").classList.add("hidden"); $("multi").classList.remove("hidden"); $("err").textContent = ""; $("room").focus(); }
     function single() { mode = "single"; secret = makeSecret(); singleHistory = []; $("home").classList.add("hidden"); $("multi").classList.add("hidden"); $("game").classList.remove("hidden"); $("roomTitle").textContent = "👤 單人模式"; $("status").textContent = "電腦已經出好題，開始推理吧！"; $("rps").classList.add("hidden"); $("guessBox").classList.remove("hidden"); $("guess").disabled = false; $("guess").value = ""; $("historyBody").innerHTML = ""; $("history").classList.add("hidden"); $("win").classList.add("hidden"); }
     function randomRoom() { return Math.random().toString(36).slice(2, 8).toUpperCase(); }
 
-    async function createRoom() { try { const name = getPlayerName(); if (!name) return; const code = ($("room").value.trim() || randomRoom()).toUpperCase(); if (!/^[A-Z0-9]{3,8}$/.test(code)) return showErr("房間代碼只能包含 3～8 個英數字。"); const roomRef = ref(db, `rooms/${code}`); if ((await get(roomRef)).exists()) return showErr("房間已存在，請換一個代碼。"); await set(roomRef, { phase: "waiting", secret: makeSecret(), turnId: null, winnerId: null, winnerName: null, players: { [myId]: { id: myId, name, rps: null } }, history: {} }); enter(code); $("multiMsg").textContent = `房間 ${code} 已建立，請把代碼分享給朋友。`; } catch (error) { showFirebaseError(error); } }
-    async function joinRoom() { try { const name = getPlayerName(); if (!name) return; const code = $("room").value.trim().toUpperCase(); if (!code) return showErr("請先輸入房間代碼。"); const roomRef = ref(db, `rooms/${code}`), snapshot = await get(roomRef); if (!snapshot.exists()) return showErr("找不到這個房間。"); const players = snapshot.val().players || {}; if (Object.keys(players).length >= 2) return showErr("房間已滿。"); await update(roomRef, { [`players/${myId}`]: { id: myId, name, rps: null }, phase: "rps" }); enter(code); } catch (error) { showFirebaseError(error); } }
-    function enter(code) { roomCode = code; mode = "multi"; $("multi").classList.add("hidden"); $("game").classList.remove("hidden"); $("roomTitle").textContent = `👥 房間：${code}`; if (stopListen) stopListen(); stopListen = onValue(ref(db, `rooms/${code}`), (snapshot) => snapshot.exists() && render(snapshot.val()), showFirebaseError); }
+    async function createRoom() { try { const name = getPlayerName(); if (!name) return; const code = ($("room").value.trim() || randomRoom()).toUpperCase(); if (!/^[A-Z0-9]{3,8}$/.test(code)) return showErr("房間代碼只能包含 3～8 個英數字。"); const roomRef = ref(db, `rooms/${code}`); if ((await get(roomRef)).exists()) return showErr("房間已存在，請換一個代碼。"); await set(roomRef, { phase: "waiting", secret: makeSecret(), turnId: null, winnerId: null, winnerName: null, notice: null, players: { [myId]: { id: myId, name, rps: null } }, history: {} }); enter(code); $("multiMsg").textContent = `房間 ${code} 已建立，請把代碼分享給朋友。`; } catch (error) { showFirebaseError(error); } }
+    async function joinRoom() { try { const name = getPlayerName(); if (!name) return; const code = $("room").value.trim().toUpperCase(); if (!code) return showErr("請先輸入房間代碼。"); const roomRef = ref(db, `rooms/${code}`), snapshot = await get(roomRef); if (!snapshot.exists()) return showErr("找不到這個房間。"); const players = snapshot.val().players || {}; if (Object.keys(players).length >= 2) return showErr("房間已滿。"); await update(roomRef, { [`players/${myId}`]: { id: myId, name, rps: null }, phase: "rps", secret: makeSecret(), turnId: null, winnerId: null, winnerName: null, notice: null, history: {} }); enter(code); } catch (error) { showFirebaseError(error); } }
+    function enter(code) { roomCode = code; mode = "multi"; $("multi").classList.add("hidden"); $("game").classList.remove("hidden"); $("roomTitle").textContent = `👥 房間：${code}`; $("win").classList.add("hidden"); if (stopListen) stopListen(); armDisconnect(code).catch(showFirebaseError); stopListen = onValue(ref(db, `rooms/${code}`), (snapshot) => snapshot.exists() ? render(snapshot.val()) : showRoomClosed(), showFirebaseError); }
     async function rps(choice) { if (roomCode) try { await set(ref(db, `rooms/${roomCode}/players/${myId}/rps`), choice); } catch (error) { showFirebaseError(error); } }
 
     async function guess() { const guessValue = $("guess").value.trim(); $("guessErr").textContent = ""; if (!valid(guessValue)) return $("guessErr").textContent = "請輸入 4 位不重複數字，第一位不能是 0。"; if (mode === "single") { const result = score(secret, guessValue); singleHistory.unshift({ name: "你", guess: guessValue, A: result.A, B: result.B, createdAt: Date.now() }); drawHistory(singleHistory); $("guess").value = ""; if (result.A === 4) { $("status").textContent = "恭喜你破解答案！"; $("win").textContent = `🏆 答案是 ${secret}`; $("win").classList.remove("hidden"); $("guessBox").classList.add("hidden"); } else $("status").textContent = `這次是 ${result.A}A${result.B}B，繼續推理！`; return; } try { const result = await runTransaction(ref(db, `rooms/${roomCode}`), (data) => { if (!data || data.phase !== "playing" || data.turnId !== myId) return data; const outcome = score(data.secret, guessValue), history = data.history || {}, createdAt = Date.now(); history[`${createdAt}_${myId}`] = { name: data.players[myId].name, guess: guessValue, A: outcome.A, B: outcome.B, createdAt }; if (outcome.A === 4) { data.phase = "finished"; data.winnerId = myId; data.winnerName = data.players[myId].name; } else { const other = Object.keys(data.players || {}).find((id) => id !== myId); if (other) data.turnId = other; } data.history = history; return data; }); $("guess").value = ""; if (!result.committed) $("guessErr").textContent = "現在不是你的回合。"; } catch (error) { showFirebaseError(error); } }
-    async function restart() { if (mode === "single") return single(); if (roomCode) try { await update(ref(db, `rooms/${roomCode}`), { phase: "rps", secret: makeSecret(), turnId: null, winnerId: null, winnerName: null, history: {}, [`players/${myId}/rps`]: null }); } catch (error) { showFirebaseError(error); } }
+    async function restart() { if (mode === "single") return single(); if (roomCode) try { await update(ref(db, `rooms/${roomCode}`), { phase: "rps", secret: makeSecret(), turnId: null, winnerId: null, winnerName: null, notice: null, history: {}, [`players/${myId}/rps`]: null }); } catch (error) { showFirebaseError(error); } }
+    function showRoomClosed() { $("status").textContent = "房間已關閉或不存在，請返回首頁重新加入。"; $("rps").classList.add("hidden"); $("guessBox").classList.add("hidden"); $("win").classList.add("hidden"); }
+    async function recoverRoomAfterPlayerLeft(data, players) {
+      if (players.length !== 1 || data.phase === "waiting") return;
+      try {
+        await runTransaction(ref(db, `rooms/${roomCode}`), (current) => {
+          const currentPlayers = Object.values(current?.players || {});
+          if (!current || current.phase === "waiting" || currentPlayers.length !== 1) return current;
+          const remainingId = currentPlayers[0].id;
+          return {
+            ...current,
+            phase: "waiting",
+            secret: makeSecret(),
+            turnId: null,
+            winnerId: null,
+            winnerName: null,
+            notice: "對方已離開房間，回合已自動重設。請等待新玩家加入。",
+            history: {},
+            players: { [remainingId]: { ...current.players[remainingId], rps: null } }
+          };
+        });
+      } catch (error) { showFirebaseError(error); }
+    }
     function drawHistory(history) { const ordered = [...history].sort((a, b) => (b.createdAt || 0) - (a.createdAt || 0)); $("history").classList.toggle("hidden", !ordered.length); $("historyBody").innerHTML = ordered.map((item, index) => `<tr class="${index === 0 ? "latest-row" : ""}"><td>${index === 0 ? '<span class="latest-badge">最新</span>' : ""}${esc(item.name)}</td><td>${esc(item.guess)}</td><td class="ab">${item.A}A${item.B}B</td></tr>`).join(""); }
 
     async function resolveRps(data, players) { if (data.phase !== "rps" || players.length !== 2 || !players.every((player) => player.rps)) return; const [a, b] = players; if (a.rps === b.rps) { await update(ref(db, `rooms/${roomCode}`), { [`players/${a.id}/rps`]: null, [`players/${b.id}/rps`]: null }); return; } const first = (a.rps === "rock" && b.rps === "scissors") || (a.rps === "scissors" && b.rps === "paper") || (a.rps === "paper" && b.rps === "rock") ? a.id : b.id; await runTransaction(ref(db, `rooms/${roomCode}`), (current) => current?.phase === "rps" ? { ...current, phase: "playing", turnId: first } : current); }
-    function render(data) { const players = Object.values(data.players || {}); const rpsText = (choice) => choice === "rock" ? "✊ 石頭" : choice === "paper" ? "✋ 布" : "✌️ 剪刀"; $("players").classList.remove("hidden"); $("players").innerHTML = players.map((player) => { const canReveal = player.id === myId || data.phase !== "rps"; const choiceText = player.rps ? (canReveal ? rpsText(player.rps) : "已出拳") : "尚未出拳"; return `<div class="player ${data.turnId === player.id && !data.winnerId ? "active" : ""}"><b>${esc(player.name)} ${player.id === myId ? "（你）" : ""}</b><br><span class="small">猜拳：${choiceText}</span></div>`; }).join(""); if (players.length < 2) { $("status").textContent = "等待另一位玩家加入……"; $("rps").classList.add("hidden"); $("guessBox").classList.add("hidden"); } else if (data.phase === "rps") { $("status").textContent = players.every((player) => player.rps) ? "正在決定先手……" : "雙方已就位，請選擇你的拳。"; $("rps").classList.remove("hidden"); $("guessBox").classList.add("hidden"); } else if (data.phase === "playing") { $("rps").classList.add("hidden"); $("guessBox").classList.remove("hidden"); $("guess").disabled = data.turnId !== myId; $("status").textContent = data.turnId === myId ? "輪到你猜！" : "輪到對方猜，請稍候。"; } else if (data.phase === "finished") { $("rps").classList.add("hidden"); $("guessBox").classList.add("hidden"); $("status").textContent = "本局遊戲結束"; $("win").textContent = `🏆 ${esc(data.winnerName)} 獲勝！答案：${esc(data.secret)}`; $("win").classList.remove("hidden"); } drawHistory(Object.values(data.history || {})); resolveRps(data, players).catch(showFirebaseError); }
+    function render(data) {
+      const players = Object.values(data.players || {});
+      const hasMe = Boolean(data.players?.[myId]);
+      const rpsText = (choice) => choice === "rock" ? "✊ 石頭" : choice === "paper" ? "✋ 布" : "✌️ 剪刀";
+      $("players").classList.remove("hidden");
+      $("players").innerHTML = players.map((player) => {
+        const canReveal = player.id === myId || data.phase !== "rps";
+        const choiceText = player.rps ? (canReveal ? rpsText(player.rps) : "已出拳") : "尚未出拳";
+        return `<div class="player ${data.turnId === player.id && !data.winnerId ? "active" : ""}"><b>${esc(player.name)} ${player.id === myId ? "（你）" : ""}</b><br><span class="small">猜拳：${choiceText}</span></div>`;
+      }).join("");
+      if (!hasMe) {
+        $("status").textContent = "你已離開房間，請返回首頁後重新加入。";
+        $("rps").classList.add("hidden"); $("guessBox").classList.add("hidden"); $("win").classList.add("hidden");
+      } else if (players.length < 2) {
+        $("status").textContent = data.notice || (data.phase !== "waiting" ? "對方已離開房間，正在自動重設回合……" : "等待另一位玩家加入……");
+        $("rps").classList.add("hidden"); $("guessBox").classList.add("hidden"); $("win").classList.add("hidden");
+        recoverRoomAfterPlayerLeft(data, players).catch(showFirebaseError);
+      } else if (data.phase === "rps") {
+        $("status").textContent = players.every((player) => player.rps) ? "正在決定先手……" : "雙方已就位，請選擇你的拳。";
+        $("rps").classList.remove("hidden"); $("guessBox").classList.add("hidden"); $("win").classList.add("hidden");
+      } else if (data.phase === "playing") {
+        $("rps").classList.add("hidden"); $("guessBox").classList.remove("hidden"); $("guess").disabled = data.turnId !== myId; $("win").classList.add("hidden");
+        $("status").textContent = data.turnId === myId ? "輪到你猜！" : "輪到對方猜，請稍候。";
+      } else if (data.phase === "finished") {
+        $("rps").classList.add("hidden"); $("guessBox").classList.add("hidden");
+        $("status").textContent = "本局遊戲結束"; $("win").textContent = `🏆 ${esc(data.winnerName)} 獲勝！答案：${esc(data.secret)}`; $("win").classList.remove("hidden");
+      }
+      drawHistory(Object.values(data.history || {}));
+      if (hasMe) resolveRps(data, players).catch(showFirebaseError);
+    }
 
     $("guess").addEventListener("keydown", (event) => event.key === "Enter" && guess());
     $("room").addEventListener("keydown", (event) => event.key === "Enter" && joinRoom());
