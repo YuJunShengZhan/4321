@@ -1,0 +1,207 @@
+<!DOCTYPE html>
+<html lang="zh-Hant">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>幾A幾B｜雙人即時版</title>
+<style>
+*{box-sizing:border-box}body{margin:0;min-height:100vh;font-family:system-ui,"Noto Sans TC",sans-serif;background:linear-gradient(135deg,#111936,#251746);color:#fff;padding:24px}
+.wrap{max-width:760px;margin:auto}.card{background:#171d38;border:1px solid #30395f;border-radius:20px;padding:22px;margin:14px 0;box-shadow:0 15px 40px #0005}
+h1{text-align:center;font-size:42px;margin:10px 0}.sub{text-align:center;color:#aeb8df}
+button,input{font:inherit;border:0;border-radius:12px;padding:12px 16px}
+button{background:#6478ff;color:white;font-weight:800;cursor:pointer}button:hover{filter:brightness(1.1)}button:disabled{opacity:.45;cursor:not-allowed}
+.secondary{background:#343d60}.danger{background:#d94f68}
+.row{display:flex;gap:10px;justify-content:center;flex-wrap:wrap}
+input{background:#0d1228;color:#fff;border:1px solid #46517a;outline:0}#room{width:180px;text-transform:uppercase;text-align:center}#guess{width:190px;text-align:center;letter-spacing:8px}
+.status{text-align:center;background:#0d132a;border-radius:12px;padding:13px;margin:14px 0;color:#dfe5ff}
+.players{display:grid;grid-template-columns:1fr 1fr;gap:10px}.player{background:#0d132a;padding:14px;border-radius:12px;border:1px solid #252d4b}.active{border-color:#8190ff}
+.choice{min-width:110px}.error{text-align:center;color:#ff91a5;min-height:24px}.win{text-align:center;color:#8df0c3;font-size:24px;font-weight:900}
+table{width:100%;border-collapse:collapse;margin-top:15px}th,td{padding:9px;border-bottom:1px solid #29314f;text-align:center}.ab{font-weight:900;color:#8df0c3}
+.hidden{display:none!important}.small{font-size:13px;color:#9fa9ce}
+@media(max-width:600px){h1{font-size:34px}.players{grid-template-columns:1fr}}
+</style>
+</head>
+<body>
+<div class="wrap">
+<h1>🎯 幾A幾B</h1>
+<p class="sub">四位不重複數字，第一位不能是 0。猜到 4A0B 就贏！</p>
+
+<div id="home" class="card">
+  <h2>選擇遊戲模式</h2>
+  <div class="row">
+    <button onclick="single()">👤 單人遊戲</button>
+    <button onclick="showMulti()">👥 雙人遊戲</button>
+  </div>
+  <p class="small">雙人模式使用 Firebase Realtime Database 即時同步，不需要 Node.js 伺服器。</p>
+</div>
+
+<div id="multi" class="card hidden">
+  <h2>👥 雙人房間</h2>
+  <div class="row">
+    <input id="room" maxlength="8" placeholder="房間代碼">
+    <button onclick="createRoom()">建立房間</button>
+    <button class="secondary" onclick="joinRoom()">加入房間</button>
+  </div>
+  <div id="multiMsg" class="status">建立房間或輸入朋友給你的房間代碼。</div>
+  <div id="err" class="error"></div>
+  <button class="secondary" onclick="home()">← 返回</button>
+</div>
+
+<div id="game" class="card hidden">
+  <div class="row" style="justify-content:space-between">
+    <button class="secondary" onclick="home()">← 返回</button>
+    <b id="roomTitle"></b>
+    <button class="danger" onclick="restart()">再來一局</button>
+  </div>
+
+  <div id="status" class="status"></div>
+
+  <div id="rps" class="hidden">
+    <h2 style="text-align:center">✊ 猜拳決定誰先</h2>
+    <div class="row">
+      <button class="choice" onclick="rps('rock')">✊ 石頭</button>
+      <button class="choice" onclick="rps('paper')">✋ 布</button>
+      <button class="choice" onclick="rps('scissors')">✌️ 剪刀</button>
+    </div>
+  </div>
+
+  <div id="guessBox" class="hidden">
+    <h2 style="text-align:center">輸入四位數</h2>
+    <div class="row">
+      <input id="guess" maxlength="4" inputmode="numeric" placeholder="1234">
+      <button onclick="guess()">猜！</button>
+    </div>
+    <div id="guessErr" class="error"></div>
+  </div>
+
+  <div id="players" class="players hidden"></div>
+
+  <table id="history" class="hidden">
+    <thead><tr><th>玩家</th><th>猜測</th><th>結果</th></tr></thead>
+    <tbody id="historyBody"></tbody>
+  </table>
+
+  <div id="win" class="win hidden"></div>
+</div>
+</div>
+
+<script type="module">
+import {initializeApp} from "https://www.gstatic.com/firebasejs/10.12.2/firebase-app.js";
+import {getDatabase, ref, set, get, onValue, update, runTransaction} from "https://www.gstatic.com/firebasejs/10.12.2/firebase-database.js";
+
+const firebaseConfig={
+  apiKey:"AIzaSyC1akT6-tAIOUnN9F6FcvBHVjcX-gYafgk",
+  authDomain:"project-1488991214081379497.firebaseapp.com",
+  databaseURL:"https://project-1488991214081379497-default-rtdb.asia-southeast1.firebasedatabase.app",
+  projectId:"project-1488991214081379497",
+  storageBucket:"project-1488991214081379497.firebasestorage.app",
+  messagingSenderId:"638810612915",
+  appId:"1:638810612915:web:c8e3bf378d6aa6b2cebcc6",
+  measurementId:"G-5DJ4ZBFJZM"
+};
+const app=initializeApp(firebaseConfig);
+const db=getDatabase(app);
+
+let mode="",myId=crypto.randomUUID(),roomCode="",stopListen=null,secret="",singleHistory=[];
+
+const $=id=>document.getElementById(id);
+const esc=s=>String(s).replace(/[&<>"']/g,c=>({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#039;"}[c]));
+function valid(s){return /^\d{4}$/.test(s)&&new Set(s).size===4&&s[0]!=="0"}
+function makeSecret(){let a=["1","2","3","4","5","6","7","8","9"];a.sort(()=>Math.random()-.5);return a.slice(0,4).join("")}
+function score(s,g){let A=0,B=0;for(let i=0;i<4;i++){if(s[i]===g[i])A++;else if(s.includes(g[i]))B++}return{A,B}}
+function home(){if(stopListen)stopListen();stopListen=null;roomCode="";mode="";$("game").classList.add("hidden");$("multi").classList.add("hidden");$("home").classList.remove("hidden")}
+function showMulti(){$("home").classList.add("hidden");$("multi").classList.remove("hidden");$("room").focus()}
+function single(){
+ mode="single";secret=makeSecret();singleHistory=[];$("home").classList.add("hidden");$("multi").classList.add("hidden");$("game").classList.remove("hidden");
+ $("roomTitle").textContent="👤 單人";$("status").textContent="電腦已出好題，開始猜吧！";$("rps").classList.add("hidden");$("guessBox").classList.remove("hidden");$("guess").disabled=false;$("history").classList.add("hidden");$("historyBody").innerHTML="";$("win").classList.add("hidden")
+}
+function randomRoom(){return Math.random().toString(36).slice(2,8).toUpperCase()}
+function showErr(s){$("err").textContent=s}
+async function createRoom(){
+ let code=($("room").value.trim()||randomRoom()).toUpperCase();
+ if(!/^[A-Z0-9]{3,8}$/.test(code))return showErr("房間代碼只能是 3～8 個英數字。");
+ const r=ref(db,"rooms/"+code);const snap=await get(r);
+ if(snap.exists())return showErr("房間已存在，請換一個代碼或直接加入。");
+ const player={id:myId,name:"玩家1",rps:null};
+ await set(r,{phase:"waiting",secret:makeSecret(),turnId:null,winnerId:null,winnerName:null,players:{[myId]:player},history:{}});
+ enter(code);$("multiMsg").textContent="房間 "+code+" 建立成功！把代碼給朋友："+code;
+}
+async function joinRoom(){
+ let code=$("room").value.trim().toUpperCase();
+ if(!code)return showErr("請輸入房間代碼。");
+ const r=ref(db,"rooms/"+code),snap=await get(r);
+ if(!snap.exists())return showErr("找不到這個房間。");
+ const d=snap.val(),players=d.players||{};
+ if(Object.keys(players).length>=2)return showErr("房間已滿。");
+ await update(r,{["players/"+myId]:{id:myId,name:"玩家2",rps:null},phase:"rps"});
+ enter(code);
+}
+function enter(code){
+ roomCode=code;mode="multi";$("multi").classList.add("hidden");$("game").classList.remove("hidden");$("roomTitle").textContent="👥 房間："+code;
+ if(stopListen)stopListen();stopListen=onValue(ref(db,"rooms/"+code),snap=>{if(snap.exists())render(snap.val())});
+}
+async function rps(choice){
+ if(!roomCode)return;
+ const r=ref(db,`rooms/${roomCode}/players/${myId}/rps`);
+ await set(r,choice);
+}
+async function guess(){
+ const g=$("guess").value.trim();$("guessErr").textContent="";
+ if(!valid(g))return $("guessErr").textContent="請輸入 4 位不重複數字，第一位不能是 0。";
+ if(mode==="single"){
+   const x=score(secret,g);singleHistory.unshift({name:"你",guess:g,A:x.A,B:x.B});drawHistory(singleHistory);
+   $("guess").value="";
+   if(x.A===4){$("status").textContent="🎉 猜中了！";$("win").textContent="答案："+secret;$("win").classList.remove("hidden");$("guessBox").classList.add("hidden")}
+   else $("status").textContent=`結果：${x.A}A${x.B}B，繼續猜！`;
+   return;
+ }
+ const r=ref(db,"rooms/"+roomCode);
+ const result=await runTransaction(r,d=>{
+   if(!d||d.phase!=="playing"||d.turnId!==myId)return d;
+   const x=score(d.secret,g),hist=d.history||{};
+   const key=String(Date.now())+"_"+myId;
+   hist[key]={name:d.players[myId].name,guess:g,A:x.A,B:x.B};
+   if(x.A===4){d.phase="finished";d.winnerId=myId;d.winnerName=d.players[myId].name}
+   else {const ids=Object.keys(d.players||{});const other=ids.find(id=>id!==myId);if(other)d.turnId=other}
+   d.history=hist;return d;
+ });
+ $("guess").value="";
+ if(!result.committed)$("guessErr").textContent="現在不是你的回合。";
+}
+async function restart(){
+ if(mode==="single")return single();
+ if(!roomCode)return;
+ await update(ref(db,"rooms/"+roomCode),{phase:"rps",secret:makeSecret(),turnId:null,winnerId:null,winnerName:null,history:{},"players/"+myId+"/rps":null});
+}
+function drawHistory(arr){
+ $("history").classList.toggle("hidden",!arr.length);$("historyBody").innerHTML=arr.map(h=>`<tr><td>${esc(h.name)}</td><td>${esc(h.guess)}</td><td class="ab">${h.A}A${h.B}B</td></tr>`).join("");
+}
+function render(d){
+ const ps=Object.values(d.players||{});
+ $("players").classList.remove("hidden");
+ $("players").innerHTML=ps.map((p,i)=>`<div class="player ${d.turnId===p.id&&!d.winnerId?"active":""}"><b>${esc(p.name)} ${p.id===myId?"（你）":""}</b><br><span class="small">猜拳：${p.rps?(p.rps==="rock"?"✊ 石頭":p.rps==="paper"?"✋ 布":"✌️ 剪刀"):"尚未出拳"}</span></div>`).join("");
+ if(ps.length<2){d.phase="waiting";$("status").textContent="等待另一位玩家加入……";$("rps").classList.add("hidden");$("guessBox").classList.add("hidden")}
+ else if(d.phase==="rps"){
+   $("status").textContent=Object.values(d.players).every(p=>p.rps)?"猜拳結果處理中……":"雙方都加入了！請選擇你的拳。";$("rps").classList.remove("hidden");$("guessBox").classList.add("hidden");
+ }else if(d.phase==="playing"){
+   $("rps").classList.add("hidden");$("guessBox").classList.remove("hidden");$("guess").disabled=d.turnId!==myId;
+   $("status").textContent=d.turnId===myId?"🎯 輪到你猜！":"⏳ 輪到對方猜，等待中……";
+ }else if(d.phase==="finished"){
+   $("rps").classList.add("hidden");$("guessBox").classList.add("hidden");$("status").textContent="遊戲結束";$("win").textContent=`🏆 ${d.winnerName} 獲勝！答案：${d.secret}`;$("win").classList.remove("hidden");
+ }
+ const hist=Object.values(d.history||{}).sort((a,b)=>0);drawHistory(hist);
+ // 如果兩人都已出拳，客戶端只負責在同一個資料庫狀態上決定先手。
+ if(d.phase==="rps"&&ps.length===2&&ps.every(p=>p.rps)){
+   const [a,b]=ps;if(a.rps===b.rps){set(ref(db,`rooms/${roomCode}/players/${a.id}/rps`),null);set(ref(db,`rooms/${roomCode}/players/${b.id}/rps`),null)}
+   else{
+     const first=(a.rps==="rock"&&b.rps==="scissors")||(a.rps==="scissors"&&b.rps==="paper")||(a.rps==="paper"&&b.rps==="rock")?a.id:b.id;
+     update(ref(db,"rooms/"+roomCode),{phase:"playing",turnId:first});
+   }
+ }
+}
+$("guess").addEventListener("keydown",e=>{if(e.key==="Enter")guess()});
+$("room").addEventListener("keydown",e=>{if(e.key==="Enter")joinRoom()});
+window.single=single;window.showMulti=showMulti;window.createRoom=createRoom;window.joinRoom=joinRoom;window.rps=rps;window.guess=guess;window.restart=restart;window.home=home;
+</script>
+</body>
+</html>
